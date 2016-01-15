@@ -42,20 +42,32 @@ sub create_tables {
 }
 
 my $db = DBI->connect("dbi:Pg:dbname=cz_osm_ogr", "", "");
-my $insert_node = $db->prepare_cached('INSERT INTO nodes VALUES(?,?,?,?)');
-my $insert_way = $db->prepare_cached('INSERT INTO ways VALUES(?,?,?)');
-my $insert_relation = $db->prepare_cached('INSERT INTO relations VALUES(?,?)');
-my $insert_node_way = $db->prepare_cached('INSERT INTO nodes_ways VALUES(?,?,?)');
-my $insert_node_relation = $db->prepare_cached('INSERT INTO nodes_relations VALUES(?,?,?)');
-my $insert_way_relation = $db->prepare_cached('INSERT INTO ways_relations VALUES(?,?,?)');
+$db->{AutoCommit}=0;
+#my $insert_node = $db->prepare_cached('INSERT INTO nodes VALUES(?,?,?,?)');
+#my $insert_way = $db->prepare_cached('INSERT INTO ways VALUES(?,?,?)');
+#my $insert_relation = $db->prepare_cached('INSERT INTO relations VALUES(?,?)');
+#my $insert_node_way = $db->prepare_cached('INSERT INTO nodes_ways VALUES(?,?,?)');
+#my $insert_node_relation = $db->prepare_cached('INSERT INTO nodes_relations VALUES(?,?,?)');
+#my $insert_way_relation = $db->prepare_cached('INSERT INTO ways_relations VALUES(?,?,?)');
 
-my $nodes = 0;
-my $ways = 0;
-my $relations = 0;
+sub batch_insert {
+	my ($table,$nodes) = @_;
+	my $query = "INSERT INTO $table VALUES";
+	foreach (@{$nodes}){
+		$query .= "(" . join(',',@$_). "),";
+	}
+	chop($query);
+	$db->do($query) or die $db->errstr;
+}
+
+my $sumnodes = 0;
+my $sumways = 0;
+my $sumrelations = 0;
 
 sub double_quote {
   my ($v) = @_;
   $v =~ s/"/\\"/g;
+  $v =~ s/'/''/g;
   "\"$v\"";
 }
 
@@ -68,7 +80,7 @@ sub hash_to_hstore {
     $s .= double_quote($k)  . '=>';
     $s .= double_quote($h->{$k}) . ',';
   }
-  $s =~ s/,$//;
+  chomp($s);
   $s;
 }
 
@@ -85,59 +97,82 @@ sub get_tags{
 	$tags;
 }
 
+my @nodes;
 sub proc_node {
 	my ($twig, $ele) = @_;
-#	print "Node!\n";
 	my $tags = get_tags($ele);
-	$insert_node->execute($ele->att('id'),$ele->att('lat'),$ele->att('lon'),hash_to_hstore($tags));
+	my $hstore = hash_to_hstore($tags);
+	push(@nodes, [$ele->att('id'),$ele->att('lat'),$ele->att('lon'),"'".hash_to_hstore($tags)."'"]);
 	$ele->purge();
-	$nodes++;
-	print "$nodes nodes processed\n" if $nodes % 1000 == 0;
+	$sumnodes ++;
+	if (@nodes % 1000 == 0){
+		batch_insert("nodes",\@nodes);
+		print $sumnodes." nodes processed\n";
+		@nodes = ();
+	
+	}
+	$db->commit	if ( $sumnodes % 100000 == 0);
 	1;
 }
 
+my @ways;
+my @nodes_ways;
 sub proc_way {
 	my ($twig, $ele) = @_;
-#	print "Way!\n";
 	my $tags = get_tags($ele);
 	my $index = 0;
 	my $id = $ele->att('id');
 	my $child = $ele->first_child("nd");
 	my $first = $child->att("ref");
-	while (defined $child) {
-                my $nd = $child->att("ref");
-				$insert_node_way->execute($nd,$id,$index);
+	for ($ele->children("nd")){
+				push @nodes_ways, [$_->att("ref"),$id,$index];
 				$index+=1;
-                $child = $child->next_sibling("nd");
     }
-	$insert_way->execute($id,hash_to_hstore($tags),$first);
+	push(@ways, [$id,"'".hash_to_hstore($tags)."'",$first]);
+	$sumways++;
 	$ele->purge();
-	$ways++;
-	print "$ways ways processed\n" if $ways % 1000 == 0;
+	if ( $sumways % 1000 == 0){
+		batch_insert("ways",\@ways);
+		batch_insert("nodes_ways",\@nodes_ways);
+		print "$sumways ways processed\n";
+		@ways = ();
+		@nodes_ways = ();
+	}
+	$db->commit	if ( $sumways % 100000 == 0);
 	1;
 }
+
+my @relations;
+my @nodes_relations;
+my @ways_relations;
 sub proc_relation {
 	my ($twig, $ele) = @_;
-#	print "Relation!\n";
 	my $tags = get_tags($ele);
 	my $id = $ele->att('id');
-	my $child = $ele->first_child("member");
-	while (defined $child) {
-                my $mid = $child->att("ref");
-				my $type = $child->att("type");
-				my $role = $child->att("role");
+	for ($ele->children("member")) {
+                my $mid = $_->att("ref");
+				my $type = $_->att("type");
+				my $role = $_->att("role");
 				if ($type eq "node"){
-					$insert_node_relation->execute($mid,$id,$role);
+					push(@nodes_relations,[$mid,$id,$role]);
 				}elsif ($type eq "way"){
-					$insert_way_relation->execute($mid,$id,$role);
+					push(@ways_relations,[$mid,$id,$role]);
 				}
-                $child = $child->next_sibling("member");
     }
-	$insert_relation->execute($id,hash_to_hstore($tags));
+	push(@relations,[$id,"'".hash_to_hstore($tags)."'"]);
 
 	$ele->purge();
-	$relations++;
-	print "$relations relations processed\n" if $relations % 1000 == 0;
+	$sumrelations++;
+	if ($sumrelations % 1000 == 0){
+		batch_insert("relations",\@relations);
+		batch_insert("nodes_relations",\@nodes_relations);
+		batch_insert("ways_relations",\@ways_relations);
+		print "$sumrelations relations processed\n";
+		@relations = ();
+		@nodes_relations = ();
+		@ways_relations = ();
+	}
+	$db->commit	if ( $sumrelations % 100000 == 0);
 	1;
 }
 
@@ -149,6 +184,7 @@ create_tables($db);
 
 print "Parsing $ARGV[0]...\n";
 $twig->parsefile($ARGV[0]);
+$db->commit;
 
 $db->disconnect;
 
