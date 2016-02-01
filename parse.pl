@@ -52,12 +52,19 @@ $db->{AutoCommit}=0;
 
 sub batch_insert {
 	my ($table,$nodes) = @_;
+	return if (@{$nodes} == 0);
 	my $query = "INSERT INTO $table VALUES";
 	foreach (@{$nodes}){
 		$query .= "(" . join(',',@$_). "),";
 	}
 	chop($query);
-	$db->do($query) or die $db->errstr;
+#	print ">>>>";
+#	print $query;
+#	print "<<<<<";
+	if ($db->do($query) == 0){
+		print $query;
+		die $db->errstr;
+	}
 }
 
 my $sumnodes = 0;
@@ -66,10 +73,12 @@ my $sumrelations = 0;
 
 sub double_quote {
   my ($v) = @_;
+  $v =~ s/\\/\\\\/g;
   $v =~ s/"/\\"/g;
   $v =~ s/'/''/g;
   "\"$v\"";
 }
+
 
 # Takes a hash ptr or hash, and returns an hstore string of the data
 sub hash_to_hstore {
@@ -153,6 +162,11 @@ sub proc_relation {
                 my $mid = $_->att("ref");
 				my $type = $_->att("type");
 				my $role = $_->att("role");
+				if ($role eq ""){ 
+					$role = "NULL";
+				} else {
+					$role = "'".$role."'";
+				}
 				if ($type eq "node"){
 					push(@nodes_relations,[$mid,$id,$role]);
 				}elsif ($type eq "way"){
@@ -184,6 +198,14 @@ create_tables($db);
 
 print "Parsing $ARGV[0]...\n";
 $twig->parsefile($ARGV[0]);
+
+batch_insert("nodes",\@nodes);
+batch_insert("ways",\@ways);
+batch_insert("nodes_ways",\@nodes_ways);
+batch_insert("relations",\@relations);
+batch_insert("nodes_relations",\@nodes_relations);
+batch_insert("ways_relations",\@ways_relations);
+
 $db->commit;
 
 $db->disconnect;
