@@ -31,12 +31,12 @@ sub create_tables {
 	my $cmd = "CREATE TABLE nodes_relations ( 
 		node_id BIGINT /*REFERENCES nodes(osm_id)*/, 
 		relation_id BIGINT /*REFERENCES relations(osm_id)*/, 
-		role VARCHAR(32));";
+		role VARCHAR(100));";
 	$db->do($cmd) or die $db->errstr;
 	my $cmd = "CREATE TABLE ways_relations ( 
 		way_id BIGINT /*REFERENCES ways(osm_id)*/, 
 		relation_id BIGINT /*REFERENCES ways(osm_id)*/, 
-		role VARCHAR(32));";
+		role VARCHAR(100));";
 	$db->do($cmd) or die $db->errstr;
 	1;
 }
