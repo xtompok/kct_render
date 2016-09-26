@@ -48,13 +48,17 @@ sub get_relation {
 			
 		my $sth = $db->prepare("SELECT node_id FROM nodes_ways WHERE way_id = $way_id"); 
 		$sth->execute() or die $db->errstr;
-		$way->{nodes} = $sth->fetchall_arrayref();
+		$way->{nodes} = [];
+		while (my @row =  $sth->fetchrow_array()){
+			push @{$way->{nodes}}, $row[0];
+		}
 	}
 
 	$relation->{ways} = \@ways;
 	return $relation;	
 }
 
+#FIXME: SQL injection prevention
 sub update_way_tags {
 	my ($way_id,$key,$value) = @_;
 	my $sth = $db->prepare("UPDATE ways SET tags = tags || '".double_quote($key)."=>".double_quote($value)."'::hstore WHERE osm_id = $way_id;");
@@ -80,6 +84,35 @@ sub mark_ways {
 }
 
 
+sub count_nodes {
+	my ($ways) = @_;
+	my %nodes;
+	foreach my $way (@{$ways}){
+		foreach my $node (@{$way->{nodes}}){
+			if ($nodes{$node}){
+				$nodes{$node}++;	
+			} else {
+				$nodes{$node} = 1;
+			}
+		}	
+	}
+	return \%nodes;
+	
+}
+
+sub orient_ways {
+	my $sth = $db->prepare("SELECT osm_id FROM relations;"); 
+	$sth->execute() or die $db->errstr;
+	while (my @row = $sth->fetchrow_array()){
+		my ($rel_id) = @row;
+		print "Relation:".$rel_id;
+		my $relation = get_relation($rel_id);
+		my $tags = Pg::hstore::decode($relation->{tags});
+		my $nodecount = count_nodes($relation->{ways});
+		print Dumper($nodecount);
+	}
+}
+
 sub merge_symbols {
 	my $sth = $db->prepare("SELECT osm_id, tags FROM ways;");
 	$sth->execute() or die $db->errstr;
@@ -98,3 +131,4 @@ sub merge_symbols {
 
 mark_ways();
 merge_symbols();
+orient_ways();
