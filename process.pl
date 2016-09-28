@@ -27,7 +27,7 @@ sub get_relation {
 	$sth->execute() or die $db->errstr;
 	my $relation = $sth->fetchrow_hashref();
 
-	my @ways;
+	my %ways;
 	my $sth = $db->prepare("SELECT way_id FROM ways_relations WHERE relation_id = $id"); 
 	$sth->execute() or die $db->errstr;
 	while (my @row = $sth->fetchrow_array()){
@@ -37,16 +37,16 @@ sub get_relation {
 		$sth->execute() or die $db->errstr;
 		my $way = $sth->fetchrow_hashref();
 		if ($way){
-			push @ways, $way;
+			$ways{$way->{osm_id}}=$way;
 		} else {
 			print "Way $way_id not found\n";
 		}
 	}
 
-	foreach my $way (@ways) {
+	foreach my $way (values(%ways)) {
 		my $way_id = $way->{osm_id};
 			
-		my $sth = $db->prepare("SELECT node_id FROM nodes_ways WHERE way_id = $way_id"); 
+		my $sth = $db->prepare("SELECT node_id FROM nodes_ways WHERE way_id = $way_id ORDER BY index"); 
 		$sth->execute() or die $db->errstr;
 		$way->{nodes} = [];
 		while (my @row =  $sth->fetchrow_array()){
@@ -54,13 +54,14 @@ sub get_relation {
 		}
 	}
 
-	$relation->{ways} = \@ways;
+	$relation->{ways} = \%ways;
 	return $relation;	
 }
 
 #FIXME: SQL injection prevention
 sub update_way_tags {
 	my ($way_id,$key,$value) = @_;
+	die "Not given way id" if not $way_id;
 	my $sth = $db->prepare("UPDATE ways SET tags = tags || '".double_quote($key)."=>".double_quote($value)."'::hstore WHERE osm_id = $way_id;");
 	$sth->execute() or die $db->errstr;
 }
@@ -76,7 +77,7 @@ sub mark_ways {
 		my $tags = Pg::hstore::decode($relation->{tags});
 		my $symbol = $tags->{"osmc:symbol"};
 		print " symbol:".$symbol."\n";
-		foreach my $way (@{$relation->{ways}}){
+		foreach my $way (values(%{$relation->{ways}})){
 			update_way_tags($way->{osm_id},"symbol_$symbol","yes");	
 		}
 		#print Dumper($relation);
@@ -90,14 +91,127 @@ sub count_nodes {
 	foreach my $way (@{$ways}){
 		foreach my $node (@{$way->{nodes}}){
 			if ($nodes{$node}){
-				$nodes{$node}++;	
+				$nodes{$node}+=2;	
 			} else {
-				$nodes{$node} = 1;
+				$nodes{$node} = 2;
+			}
+		}
+		$nodes{$way->{nodes}->[0]}--;
+		$nodes{$way->{nodes}->[-1]}--;
+	}
+	return \%nodes;	
+}
+
+sub node_ways {
+	my ($ways) = @_;
+	my %nodeways;
+	foreach my $way (@{$ways}){
+		foreach my $node (@{$way->{nodes}}){
+			if ($nodeways{$node}){
+				push $nodeways{$node},$way;
+			}else{
+				$nodeways{$node} = [$way];
 			}
 		}	
+	}	
+	return \%nodeways;
+}
+
+sub orient_way {
+	my ($way,$from) = @_;
+	return if $way->{orientation};
+	if ($way->{nodes}->[-1] == $from){
+		update_way_tags($way->{osm_id},"orientation","backward");
+		$way->{orientation} = "backward";
+	} else {
+		update_way_tags($way->{osm_id},"orientation","forward");
+		$way->{orientation} = "forward";
 	}
-	return \%nodes;
+}
+
+sub next_ways {
+	my ($way,$node) = @_;
+	my $index;
+	for (my $i=0;$i<@{$way->{nodes}};$i++){
+		if ($way->{nodes}->[$i] == $node){
+			$index = $i;
+			last;	
+		}	
+	}
+
+	return [$way->{nodes}->[1]] if $index == 0;
+	return [$way->{nodes}->[-2]] if $index == @{$way->{nodes}}-1;
+	return [$way->{nodes}->[$index-1],$way->{nodes}->[$index+1]];
+}
+
+sub get_neighbors {
+	# {vrchol (id) = [[way(id),vrchol(id)],...],...	}
+	my %neighbors;
+	my @ways = @{$_[0]};
+	foreach my $way (@ways){
+		foreach my $node (@{$way->{nodes}}){
+			$neighbors{$node} = [];	
+		}
+	}
+	foreach my $way (@ways){
+		my @nodes = @{$way->{nodes}};
+		for (my $idx=0;$idx < @nodes-1;$idx++){
+			push $neighbors{$nodes[$idx]}, [$way->{osm_id},$nodes[$idx+1]];
+			push $neighbors{$nodes[$idx+1]}, [$way->{osm_id},$nodes[$idx]];
+		}
+	}
+	return \%neighbors;
 	
+}
+
+sub orient_relation {
+	my ($relation) = @_;
+	my $tags = Pg::hstore::decode($relation->{tags});
+	my @ways = values $relation->{ways};
+	my $nodecount = count_nodes(\@ways);
+	my $neighbors = get_neighbors(\@ways);
+
+	my $cur;
+	my @buffer;
+	my %visited;
+	foreach my $node (keys(%{$nodecount})){
+		if ($nodecount->{$node} == 1){
+			$cur = $node;
+			last;
+		}
+	}
+
+	if (not $cur){
+		print "Circle found, picking random node";
+		$cur = @{keys(%{$nodecount})}[0];
+	}
+	
+
+	foreach my $neigh (@{$neighbors->{$cur}}){
+		push @buffer, $neigh;
+	}
+	$visited{$cur} = 1;
+
+
+	while (@buffer) {
+		my $item = pop @buffer;
+		my $way = $item->[0];
+		my $node = $item->[1];
+
+		orient_way($relation->{ways}->{$way},$node);
+		$visited{$node} = 1;
+
+		foreach my $neigh (@{$neighbors->{$node}}){
+			push @buffer, $neigh if not $visited{$neigh->[1]};	
+		}
+	}
+
+#	while ((my $key,my  $value) = each %{$neighbors}){
+#		print Dumper($value) if (@{$value} != 2);
+#	}
+	
+#	print Dumper($neighbors);
+		
 }
 
 sub orient_ways {
@@ -105,11 +219,9 @@ sub orient_ways {
 	$sth->execute() or die $db->errstr;
 	while (my @row = $sth->fetchrow_array()){
 		my ($rel_id) = @row;
-		print "Relation:".$rel_id;
+		print "Relation:".$rel_id."\n";
 		my $relation = get_relation($rel_id);
-		my $tags = Pg::hstore::decode($relation->{tags});
-		my $nodecount = count_nodes($relation->{ways});
-		print Dumper($nodecount);
+		orient_relation($relation);
 	}
 }
 
@@ -124,6 +236,7 @@ sub merge_symbols {
 		$kct .="g" if $tags->{"symbol_green:white:green_bar"};
 		$kct .="b" if $tags->{"symbol_blue:white:blue_bar"};
 		$kct .="y" if $tags->{"symbol_yellow:white:yellow_bar"};
+			
 
 		update_way_tags($way_id,"kct_symbols",$kct);
 	}
