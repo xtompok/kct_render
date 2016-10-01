@@ -11,6 +11,7 @@ use Pg::hstore;
 
 
 my $db = DBI->connect("dbi:Pg:dbname=cz_osm", "", "");
+$db->{AutoCommit}=0;
 
 sub double_quote {
   my ($v) = @_;
@@ -118,30 +119,43 @@ sub node_ways {
 }
 
 sub orient_way {
-	my ($way,$from) = @_;
+	my ($way,$from_node,$from_way) = @_;
 	return if $way->{orientation};
-	if ($way->{nodes}->[-1] == $from){
-		update_way_tags($way->{osm_id},"orientation","backward");
-		$way->{orientation} = "backward";
-	} else {
+	#print "Orient way1:".$way->{nodes}->[0]." ".$from_node." ".$from_way->{nodes}->[0]."\n";
+	#print "Orient way2:".$way->{nodes}->[-1]." ".$from_node." ".$from_way->{nodes}->[-1]."\n";
+	# First way in search
+	if (not $from_way){
 		update_way_tags($way->{osm_id},"orientation","forward");
 		$way->{orientation} = "forward";
-	}
-}
-
-sub next_ways {
-	my ($way,$node) = @_;
-	my $index;
-	for (my $i=0;$i<@{$way->{nodes}};$i++){
-		if ($way->{nodes}->[$i] == $node){
-			$index = $i;
-			last;	
-		}	
+		update_way_tags($way->{osm_id},"first","yes");
+		return;
 	}
 
-	return [$way->{nodes}->[1]] if $index == 0;
-	return [$way->{nodes}->[-2]] if $index == @{$way->{nodes}}-1;
-	return [$way->{nodes}->[$index-1],$way->{nodes}->[$index+1]];
+	if ($from_way->{nodes}->[0] == $way->{nodes}->[0] or $from_way->{nodes}->[-1] == $way->{nodes}->[-1]){
+			if ($from_way->{orientation} == "forward"){
+				update_way_tags($way->{osm_id},"orientation","backward");
+				$way->{orientation} = "backward";
+			} else {
+				update_way_tags($way->{osm_id},"orientation","forward");
+				$way->{orientation} = "forward";	
+			}
+	
+	} elsif ($from_way->{nodes}->[0] == $way->{nodes}->[-1] or $from_way->{nodes}->[-1] == $way->{nodes}->[0]){
+	
+			if ($from_way->{orientation} == "forward"){
+				update_way_tags($way->{osm_id},"orientation","forward");
+				$way->{orientation} = "forward";
+			} else {
+				update_way_tags($way->{osm_id},"orientation","backward");
+				$way->{orientation} = "backward";	
+			}
+	}else{
+		update_way_tags($way->{osm_id},"orientation","forward");
+		$way->{orientation} = "forward";
+		
+	}
+	#print "\n";
+
 }
 
 sub get_neighbors {
@@ -168,48 +182,57 @@ sub orient_relation {
 	my ($relation) = @_;
 	my $tags = Pg::hstore::decode($relation->{tags});
 	my @ways = values $relation->{ways};
-	my $nodecount = count_nodes(\@ways);
 	my $neighbors = get_neighbors(\@ways);
 
-	my $cur;
 	my @buffer;
 	my %visited;
-	foreach my $node (keys(%{$nodecount})){
-		if ($nodecount->{$node} == 1){
-			$cur = $node;
-			last;
+	my %unoriented;
+
+	foreach my $way (@ways){
+		$unoriented{$way->{osm_id}}=1;	
+	}
+	while (keys %unoriented){
+		my $cur;
+		while ((my $node, my $neighs) = each %{$neighbors}){
+			if (@{$neighs} == 1 and $unoriented{@{$neighs}[0]->[0]}){
+				$cur = $node;
+				last;
+			}
+		}
+
+		if (not $cur){
+			print "Circle found, picking random node\n";
+			$cur = $relation->{ways}->{(keys %unoriented)[0]}->{nodes}->[0];
+		}
+		
+
+		foreach my $neigh (@{$neighbors->{$cur}}){
+			push @buffer, [$relation->{ways}->{$neigh->[0]},$neigh->[1],undef];
+		}
+		$visited{$cur} = 1;
+
+
+		while (@buffer) {
+			my $item = pop @buffer;
+			my $way = $item->[0];
+			my $node = $item->[1];
+			my $from_way = $item->[2];
+
+		#	print("At:".$way->{osm_id}." ".$node." ".$from_way->{osm_id}."\n");
+			orient_way($way,$node,$from_way);
+			delete $unoriented{$way->{osm_id}};
+			$visited{$node} = 1;
+
+
+			foreach my $neigh (@{$neighbors->{$node}}){
+				push @buffer, [$relation->{ways}->{$neigh->[0]},$neigh->[1],$way] if not $visited{$neigh->[1]};	
+			}
 		}
 	}
-
-	if (not $cur){
-		print "Circle found, picking random node";
-		$cur = @{keys(%{$nodecount})}[0];
-	}
-	
-
-	foreach my $neigh (@{$neighbors->{$cur}}){
-		push @buffer, $neigh;
-	}
-	$visited{$cur} = 1;
+	$db->commit;
 
 
-	while (@buffer) {
-		my $item = pop @buffer;
-		my $way = $item->[0];
-		my $node = $item->[1];
 
-		orient_way($relation->{ways}->{$way},$node);
-		$visited{$node} = 1;
-
-		foreach my $neigh (@{$neighbors->{$node}}){
-			push @buffer, $neigh if not $visited{$neigh->[1]};	
-		}
-	}
-
-#	while ((my $key,my  $value) = each %{$neighbors}){
-#		print Dumper($value) if (@{$value} != 2);
-#	}
-	
 #	print Dumper($neighbors);
 		
 }
