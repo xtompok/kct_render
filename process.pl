@@ -103,26 +103,46 @@ sub count_nodes {
 	return \%nodes;	
 }
 
-sub node_ways {
-	my ($ways) = @_;
+sub ways_neigh {
+	my ($waysref) = @_;
+	my @ways = @{$waysref};
 	my %nodeways;
-	foreach my $way (@{$ways}){
+	foreach my $way (@ways){
 		foreach my $node (@{$way->{nodes}}){
 			if ($nodeways{$node}){
-				push $nodeways{$node},$way;
+				push @{$nodeways{$node}},$way;
 			}else{
 				$nodeways{$node} = [$way];
 			}
 		}	
 	}	
-	return \%nodeways;
+
+	my %neighbors;
+	foreach my $way (@ways){
+		$neighbors{$way->{osm_id}}=[];
+	}
+	foreach my $way (@ways){
+		foreach my $node (@{$way->{nodes}}){
+			foreach my $nextway (@{$nodeways{$node}}){
+				push $neighbors{$way->{osm_id}}, $nextway if $nextway->{osm_id} != $way->{osm_id};	
+			}
+		}	
+	}
+#	while (my ($way,$nexts) = each %neighbors){
+#		print "Neighs:".$way.":";
+#		foreach my $next (@{$nexts}){
+#			print $next->{osm_id}.",";	
+#		}
+#		print "\n";
+#	}
+	return \%neighbors;
 }
 
 sub orient_way {
-	my ($way,$from_node,$from_way) = @_;
+	my ($way,$from_way) = @_;
 	return if $way->{orientation};
-	#print "Orient way1:".$way->{nodes}->[0]." ".$from_node." ".$from_way->{nodes}->[0]."\n";
-	#print "Orient way2:".$way->{nodes}->[-1]." ".$from_node." ".$from_way->{nodes}->[-1]."\n";
+	#print "Orient way ".$way->{osm_id}.":".$way->{nodes}->[0]." ".$way->{nodes}->[-1]."\n";
+	#print "From way ".$from_way->{osm_id}.":".$from_way->{nodes}->[0]." ".$from_way->{nodes}->[-1]." ".$from_way->{orientation}."\n";
 	# First way in search
 	if (not $from_way){
 		update_way_tags($way->{osm_id},"orientation","forward");
@@ -131,8 +151,8 @@ sub orient_way {
 		return;
 	}
 
-	if ($from_way->{nodes}->[0] == $way->{nodes}->[0] or $from_way->{nodes}->[-1] == $way->{nodes}->[-1]){
-			if ($from_way->{orientation} == "forward"){
+	if (($from_way->{nodes}->[0] == $way->{nodes}->[0]) or ($from_way->{nodes}->[-1] == $way->{nodes}->[-1])){
+			if ($from_way->{orientation} eq "forward"){
 				update_way_tags($way->{osm_id},"orientation","backward");
 				$way->{orientation} = "backward";
 			} else {
@@ -140,9 +160,9 @@ sub orient_way {
 				$way->{orientation} = "forward";	
 			}
 	
-	} elsif ($from_way->{nodes}->[0] == $way->{nodes}->[-1] or $from_way->{nodes}->[-1] == $way->{nodes}->[0]){
+	} elsif (($from_way->{nodes}->[0] == $way->{nodes}->[-1]) or ($from_way->{nodes}->[-1] == $way->{nodes}->[0])){
 	
-			if ($from_way->{orientation} == "forward"){
+			if ($from_way->{orientation} eq "forward"){
 				update_way_tags($way->{osm_id},"orientation","forward");
 				$way->{orientation} = "forward";
 			} else {
@@ -154,6 +174,7 @@ sub orient_way {
 		$way->{orientation} = "forward";
 		
 	}
+	#print "Oriented: ".$way->{orientation}."\n"
 	#print "\n";
 
 }
@@ -182,9 +203,9 @@ sub orient_relation {
 	my ($relation) = @_;
 	my $tags = Pg::hstore::decode($relation->{tags});
 	my @ways = values $relation->{ways};
-	my $neighbors = get_neighbors(\@ways);
+	#my $nneighbors = get_neighbors(\@ways);
+	my $wneighbors = ways_neigh(\@ways);
 
-	my @buffer;
 	my %visited;
 	my %unoriented;
 
@@ -193,39 +214,29 @@ sub orient_relation {
 	}
 	while (keys %unoriented){
 		my $cur;
-		while ((my $node, my $neighs) = each %{$neighbors}){
-			if (@{$neighs} == 1 and $unoriented{@{$neighs}[0]->[0]}){
-				$cur = $node;
-				last;
-			}
-		}
-
-		if (not $cur){
-			print "Circle found, picking random node\n";
-			$cur = $relation->{ways}->{(keys %unoriented)[0]}->{nodes}->[0];
-		}
+		$cur = $relation->{ways}->{(keys %unoriented)[0]};
+		#print $cur;
 		
+		my @buffer;
 
-		foreach my $neigh (@{$neighbors->{$cur}}){
-			push @buffer, [$relation->{ways}->{$neigh->[0]},$neigh->[1],undef];
-		}
-		$visited{$cur} = 1;
+		push @buffer, [$cur,undef];
+
 
 
 		while (@buffer) {
 			my $item = pop @buffer;
+			#print Dumper($item);
 			my $way = $item->[0];
-			my $node = $item->[1];
-			my $from_way = $item->[2];
+			my $from_way = $item->[1];
 
 		#	print("At:".$way->{osm_id}." ".$node." ".$from_way->{osm_id}."\n");
-			orient_way($way,$node,$from_way);
+			orient_way($way,$from_way);
 			delete $unoriented{$way->{osm_id}};
-			$visited{$node} = 1;
+			$visited{$way->{osm_id}} = 1;
 
 
-			foreach my $neigh (@{$neighbors->{$node}}){
-				push @buffer, [$relation->{ways}->{$neigh->[0]},$neigh->[1],$way] if not $visited{$neigh->[1]};	
+			foreach my $neigh (@{$wneighbors->{$way->{osm_id}}}){
+				push @buffer, [$neigh,$way] if not $visited{$neigh->{osm_id}};	
 			}
 		}
 	}
@@ -246,6 +257,10 @@ sub orient_ways {
 		my $relation = get_relation($rel_id);
 		orient_relation($relation);
 	}
+#	my $rel_id = 229808;
+#	print "Relation:".$rel_id."\n";
+#	my $relation = get_relation($rel_id);
+#	orient_relation($relation);
 }
 
 sub merge_symbols {
